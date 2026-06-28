@@ -1,25 +1,26 @@
 import os
-import json
 import base64
-import requests
-from flask import Flask, request, abort
+from flask import Flask, request, abort, send_file
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, ImageSendMessage
+from linebot.models import MessageEvent, TextMessage, ImageSendMessage, TextSendMessage
 import google.generativeai as genai
-from PIL import Image
 import io
+import uuid
 
 app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+BASE_URL = os.environ.get("BASE_URL")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 genai.configure(api_key=GEMINI_API_KEY)
+
+image_store = {}
 
 
 def generate_stamp_image(text):
@@ -36,23 +37,18 @@ def generate_stamp_image(text):
     )
     for part in response.candidates[0].content.parts:
         if part.inline_data:
-            image_data = base64.b64decode(part.inline_data.data)
-            return image_data
+            return base64.b64decode(part.inline_data.data)
     return None
 
 
-def upload_image_to_imgur(image_data):
-    headers = {"Authorization": "Client-ID " + os.environ.get("IMGUR_CLIENT_ID", "")}
-    b64_image = base64.b64encode(image_data).decode("utf-8")
-    response = requests.post(
-        "https://api.imgur.com/3/image",
-        headers=headers,
-        data={"image": b64_image, "type": "base64"},
-    )
-    result = response.json()
-    if result.get("success"):
-        return result["data"]["link"]
-    return None
+@app.route("/images/<image_id>")
+def serve_image(image_id):
+    if image_id in image_store:
+        return send_file(
+            io.BytesIO(image_store[image_id]),
+            mimetype="image/png",
+        )
+    abort(404)
 
 
 @app.route("/callback", methods=["POST"])
@@ -71,20 +67,21 @@ def handle_message(event):
     text = event.message.text
     image_data = generate_stamp_image(text)
     if image_data:
-        image_url = upload_image_to_imgur(image_data)
-        if image_url:
-            line_bot_api.reply_message(
-                event.reply_token,
-                ImageSendMessage(
-                    original_content_url=image_url,
-                    preview_image_url=image_url,
-                ),
-            )
-            return
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextMessage(text="画像生成に失敗しました。もう一度試してください。"),
-    )
+        image_id = str(uuid.uuid4())
+        image_store[image_id] = image_data
+        image_url = f"{BASE_URL}/images/{image_id}"
+        line_bot_api.reply_message(
+            event.reply_token,
+            ImageSendMessage(
+                original_content_url=image_url,
+                preview_image_url=image_url,
+            ),
+        )
+    else:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="画像生成に失敗しました。もう一度試してください。"),
+        )
 
 
 @app.route("/")
